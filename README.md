@@ -1,193 +1,99 @@
-## FastApi-App
+# URL Shortener
 
-[Completed App](https://github.com/Nditah/hello-fastapi) | 
-[FastApi Official Website](https://fastapi.tiangolo.com//) | 
+A small, production-style FastAPI URL shortener. This is the **app layer** of a larger DevOps
+portfolio project — this same codebase is later deployed via Terraform onto AWS ECS (EC2),
+then onto Kubernetes with ArgoCD, and monitored with Prometheus/Grafana. This repo focuses on
+getting the application itself right: clean structure, env-driven config, real migrations, and
+tests that run against real dependencies.
 
-
-1. Make a Directory for the Project and navigate into it
-     > mkdir fastapi-app && cd fastapi-app
-
-2. Create a Python Virtual Environment and Activate it
-     > python3 -m venv venv 
-     > ls
-     > source venv/bin/activate
-
-3. Install Fastapi 
-     > pip install fastapi
-
-4. Install an ASGI server 
-     > pip install "uvicorn[standard]"
-
-5. Install package for the template 
-     > pip install python-multipart jinja2
-
-6. Install package for database support
-     > pip install sqlalchemy
-
-
-7. The Open the Project with VSCode and create three files: `app.py`, `database.py` and `models.py`
-
-Note:
- Update Pip `python3 -m pip install --upgrade pip`
-
-## app.py
-
-```py
-from fastapi import FastAPI, Depends, Request, Form, status
-
-from starlette.responses import RedirectResponse
-from starlette.templating import Jinja2Templates
-
-from sqlalchemy.orm import Session
-from database import SessionLocal, engine
-import models
-
-models.Base.metadata.create_all(bind=engine)
-
-templates = Jinja2Templates(directory="templates")
-
-app = FastAPI()
-
-# Dependency
-def get_db():
-    db = SessionLocal()
-    try: 
-        yield db
-    finally:
-        db.close()
-
-@app.get("/")
-async def home(req: Request, db: Session = Depends(get_db)):
-    todos = db.query(models.Todo).all()
-    return templates.TemplateResponse("base.html", { "request": req, "todo_list": todos })
-
-@app.post("/add")
-def add(req: Request, title: str = Form(...), db: Session = Depends(get_db)):
-    new_todo = models.Todo(title=title)
-    db.add(new_todo)
-    db.commit()
-    url = app.url_path_for("home")
-    return RedirectResponse(url=url, status_code=status.HTTP_303_SEE_OTHER)
-
-@app.get("/update/{todo_id}")
-def add(req: Request, todo_id: int, db: Session = Depends(get_db)):
-    todo = db.query(models.Todo).filter(models.Todo.id == todo_id).first()
-    todo.complete = not todo.complete
-    db.commit()
-    url = app.url_path_for("home")
-    return RedirectResponse(url=url, status_code=status.HTTP_303_SEE_OTHER)
-
-
-@app.get("/delete/{todo_id}")
-def add(req: Request, todo_id: int, db: Session = Depends(get_db)):
-    todo = db.query(models.Todo).filter(models.Todo.id == todo_id).first()
-    db.delete(todo)
-    db.commit()
-    url = app.url_path_for("home")
-    return RedirectResponse(url=url, status_code=status.HTTP_303_SEE_OTHER)
-
+## Architecture
 
 ```
-
-## models.py
-
-```py
-from sqlalchemy import Boolean, Column, Integer, String
-from database import Base
-
-class Todo(Base):
-    __tablename__ = "todos"
-
-    id = Column(Integer, primary_key=True)
-    title = Column(String(100))
-    complete = Column(Boolean, default=False) 
-
+client --> FastAPI --> Redis (cache-aside) --> Postgres
+                 \--> /metrics (Prometheus text format)
 ```
 
-## database.py
+- **Postgres** is the source of truth for shortened URLs, managed by **Alembic** migrations.
+- **Redis** caches `code -> target_url` lookups (cache-aside, TTL-based) so repeated redirects
+  don't hit Postgres.
+- **prometheus-fastapi-instrumentator** exposes request count/latency metrics at `/metrics` for
+  future scraping by Prometheus.
 
-```py
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.ext.declarative import declarative_base
+## Endpoints
 
-DB_URL = "sqlite:///./db.sqlite"
+| Method | Path       | Description                                  |
+|--------|------------|-----------------------------------------------|
+| POST   | `/shorten` | Create a short code for a URL                 |
+| GET    | `/{code}`  | Redirect to the original URL (302)            |
+| GET    | `/health`  | Liveness/readiness check (Postgres + Redis)   |
+| GET    | `/metrics` | Prometheus-format metrics                     |
 
-engine = create_engine(DB_URL, connect_args = { "check_same_thread": False })
+## Run locally
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Requires Docker and Docker Compose.
 
-Base = declarative_base() 
+```bash
+cp .env.example .env
 
+# start the databases
+docker compose up -d postgres redis
+
+# apply migrations (one-off, not run automatically on container start)
+docker compose run --rm app alembic upgrade head
+
+# start the app
+docker compose up -d app
 ```
 
+Try it out:
 
+```bash
+curl -X POST localhost:8000/shorten \
+  -H 'Content-Type: application/json' \
+  -d '{"url": "https://example.com"}'
+# {"code":"abc1234","short_url":"http://localhost:8000/abc1234","target_url":"https://example.com/"}
 
-## templates/base.html
+curl -i -L localhost:8000/abc1234
+# redirects to https://example.com/
 
-```html
-<!DOCTYPE html>
-<html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Todo App - Fastapi</title>
-        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/semantic-ui@2.4.2/dist/semantic.min.css">
-        <script src="https://cdn.jsdelivr.net/npm/semantic-ui@2.4.2/dist/semantic.min.js"></script>
-    </head>
-    <body>
-        <div style="margin-top: 50px;" class="ui container">
-            <h1 class="ui center aligned header">Fastapi ToDo App</h1>
-
-            <form class="ui form" action="/add" method="post">
-                <div class="field">
-                    <label>Todo Title</label>
-                    <input type="text" name="title" placeholder="Enter ToDo task...">
-                    <br>
-                </div>
-                <button class="ui blue button" type="submit">Add</button>
-            </form>
-
-            <hr>
-
-            {% for todo in todo_list %} 
-            <div class="ui segment">
-                <p class="ui big header">{{ todo.id }} | {{ todo.title }}</p>
-
-                {% if todo.complete == False %}
-                <span class="ui gray label">Not Complete</span>
-                {% else %}
-                <span class="ui green label">Complete</span>
-                {% endif %}
-
-                <a class="ui blue button" href="/update/{{ todo.id }}">Update</a>
-                <a class="ui red button" href="/delete/{{ todo.id }}">Delete</a>
-
-            </div>
-            {% endfor %}
-
-        </div>
-
-
-    </body>
-
-</html>
-
+curl localhost:8000/health
+curl localhost:8000/metrics
 ```
 
-6. To run the app, with uvicorn using the file_name:app_instance
+## Run tests
 
-     > uvicorn app:app --reload
+Tests run against real Postgres and Redis (no mocking), matching CI.
 
-Preview the App at http://127.0.0.1:8000/ and the out-of-the-box [API Documentation](http://127.0.0.1:8000/docs)
+```bash
+docker compose up -d postgres redis
 
-7. Commit and push your code to github.com and Deactivate the Virtual Env.
-   
-    $ deactivate
-    $ conda deactivate
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
 
+export DATABASE_URL=postgresql+psycopg://urlshortener:urlshortener@localhost:5432/urlshortener
+export REDIS_URL=redis://localhost:6379/0
 
-###
+alembic upgrade head
+pytest -v
+```
 
-- 📚 Sam's other blogs: [Dev.to](https://dev.to/nditah) | [Hashnode.dev](https://nditah.hashnode.dev/) | [Medium.com](https://nditah.medium.com/)
-- [Github](https://github.com/Nditah)
+## Lint
+
+```bash
+ruff check .
+```
+
+## CI
+
+GitHub Actions (`.github/workflows/ci.yml`) runs on every push and pull request:
+- `lint` — `ruff check .`
+- `test` — pytest against Postgres + Redis service containers
+- `docker-build` — builds the production image
+
+## Project status / roadmap
+
+This repo is step 1 of a multi-phase DevOps portfolio:
+1. **This repo** — the FastAPI app, containerized, tested, CI'd.
+2. Terraform + AWS ECS (EC2) deployment.
+3. Kubernetes + ArgoCD deployment.
+4. Prometheus + Grafana observability stack.
