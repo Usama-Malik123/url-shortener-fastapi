@@ -1,0 +1,16 @@
+.git
+.github
+.venv
+myenv
+__pycache__
+*.pyc
+tests
+.env
+.env.example
+README.md
+CLAUDE.md
+docker-compose.yml
+*.sqlite
+*.sqlite3
+.pytest_cache
+.ruff_cache
